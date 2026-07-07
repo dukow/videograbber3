@@ -1,0 +1,78 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Create Flutter project skeleton
+        run: |
+          flutter create --org com.dukoow --project-name videograbber app
+
+      - name: Copy source files into project
+        run: |
+          cp -f lib/main.dart app/lib/main.dart
+          cp -f pubspec.yaml app/pubspec.yaml
+          cp -f android/app/src/main/AndroidManifest.xml app/android/app/src/main/AndroidManifest.xml
+          mkdir -p app/android/app/src/main/kotlin/com/dukoow/videograbber
+          cp -rf android/app/src/main/kotlin/com/dukoow/videograbber/. \
+                 app/android/app/src/main/kotlin/com/dukoow/videograbber/
+
+      - name: Patch Gradle file with yt-dlp library
+        run: |
+          cd app/android/app
+          python3 << 'PYEOF'
+          import re
+          p = 'build.gradle.kts'
+          s = open(p).read()
+          s = s.replace('android {', 'android {\n    packaging { jniLibs { useLegacyPackaging = true } }', 1)
+          s = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 24', s)
+          s = s.replace('release {', 'release {\n            isMinifyEnabled = false\n            isShrinkResources = false', 1)
+          if 'youtubedl-android' not in s:
+              s += '\ndependencies {\n    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")\n    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")\n    implementation("androidx.core:core-ktx:1.13.1")\n}\n'
+          open(p, 'w').write(s)
+          PYEOF
+          echo "=== Patched build.gradle.kts ==="
+          cat build.gradle.kts
+
+      - name: Build APK
+        run: |
+          set -o pipefail
+          cd app
+          flutter pub get 2>&1 | tee -a build_log.txt
+          sed -i "s/proguard-android\.txt/proguard-android-optimize.txt/g" \
+            $HOME/.pub-cache/hosted/pub.dev/flutter_inappwebview_android-*/android/build.gradle
+          echo "Patched inappwebview plugin proguard reference" | tee -a build_log.txt
+          flutter build apk --release 2>&1 | tee -a build_log.txt
+
+      - name: Show error publicly on failure
+        if: failure()
+        run: |
+          echo "## BUILD FAILED - LAST 150 LINES OF LOG" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -150 app/build_log.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "no log captured" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoGrabber-APK
+          path: app/build/app/outputs/flutter-apk/app-release.apk
